@@ -160,6 +160,33 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     await update.message.reply_text("Blacklist:\n" + "\n".join(str(i) for i in BLACK_LIST))
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    text = (
+        f"Your first name: {update.effective_user.first_name}\n"+
+        f"Your last name: {update.effective_user.last_name}\n"
+        f"Your username: @{update.effective_user.username}\n"
+        f"Your telegram ID: {user_id}"
+    )
+    if (user_id in ADMINS_IDS): text += "\nYou are an admin"
+    await update.message.reply_text(text)
+
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    photos = await update.effective_user.get_profile_photos(limit=1)
+    text = (
+        f"Your first name: {update.effective_user.first_name}\n"
+        f"Your last name: {update.effective_user.last_name}\n"
+        f"Your username: @{update.effective_user.username}\n"
+        f"Your telegram ID: {user_id}"
+    )
+    if (user_id in ADMINS_IDS): text+="\nYou are an admin"
+
+    if photos.total_count > 0:
+        photo = photos.photos[0][-1].file_id
+        await update.message.reply_photo(photo=photo, caption=text)
+    else: await update.message.reply_text(text)
+
 def main():
     load_blacklist()
     app = Application.builder().token(API_TOKEN).connect_timeout(100).read_timeout(100).build()
@@ -172,6 +199,8 @@ def main():
     app.add_handler(CommandHandler("block", block_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
     app.add_handler(CommandHandler("blacklist", blacklist_command))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("info", info))
 
     print("Bot is running...")
     app.run_polling()
