@@ -33,6 +33,18 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         except Exception as e:
             print(f"Failed to notify admin {admin_id}: {e}")
 
+async def resolve_target(raw: str, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    raw = raw.strip()
+    if raw.lstrip('-').isdigit(): return int(raw)
+    if raw.startswith('@'):
+        try:
+            chat = await context.bot.get_chat(raw)
+            return chat.id
+        except Exception as e:
+            # print(f"No chat with user {raw}, {e}")
+            return None
+    return None
+
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.inline_query.from_user.id
     if user_id in BLACK_LIST: return
@@ -44,8 +56,9 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     main = parts[0].split(maxsplit = 1)
     if len(main) < 2: return
 
-    try: target_id = int(main[0].strip())
-    except ValueError: return
+    target_id = await resolve_target(main[0], context)
+    if target_id is None: return
+
     text = main[1].strip()
     if not text: return
 
@@ -90,10 +103,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if clicker_id == message_data["sender_id"] or clicker_id == message_data["target_id"]:
         await query.answer(text=f"Message:\n\n{message_data['text']}", show_alert=True)
-        await notify_admins(context,f"User @{clicker_username} ({clicker_id}) opened message")
-    else:
-        await query.answer(text=message_data["not_for_you_text"], show_alert=True)
-        await notify_admins(context,f"User @{clicker_username} ({clicker_id}) tried to open a message")
+    else: await query.answer(text=message_data["not_for_you_text"], show_alert=True)
+    await notify_admins(context,f"User @{clicker_username} ({clicker_id}) clicked on {message_key}")
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
