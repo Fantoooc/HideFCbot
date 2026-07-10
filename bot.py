@@ -34,7 +34,6 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
             print(f"Failed to notify admin {admin_id}: {e}")
 
 async def resolve_target(raw: str, context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    raw = raw.strip()
     if raw.lstrip('-').isdigit(): return int(raw)
     if raw.startswith('@'):
         try:
@@ -49,37 +48,68 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.inline_query.from_user.id
     if user_id in BLACK_LIST: return
 
+    results = []
+
+    user = update.inline_query.from_user
+    info_text = (
+        f"Your first name: {user.first_name or '-'}\n"
+        f"Your last name: {user.last_name or '-'}\n"
+        f"Your username: @{user.username or '-'}\n"
+        f"Your telegram ID: {user_id}"
+    )
+    if user_id in ADMINS_IDS: info_text += "\nYou are an admin"
+
+    results.append(
+        InlineQueryResultArticle(
+            id = "info",
+            title = "Send my info",
+            description = info_text.replace("\n", " | "),
+            input_message_content = InputTextMessageContent(message_text = info_text)
+        )
+    )
+
     raw = update.inline_query.query
     parts = [ part.strip() for part in raw.split('|') ]
-    if len(parts) < 1 or not parts[0]: return
 
-    main = parts[0].split(maxsplit = 1)
-    if len(main) < 2: return
+    if len(parts) >= 1 and parts[0]:
+        main = parts[0].split(maxsplit = 1)
+        if len(main) >= 2:
+            raw_id = main[0].strip()
+            exc_mode = raw_id.startswith('!')
+            id_part = raw_id[1:] if exc_mode else raw_id
+            target_id = await resolve_target(id_part, context)
+            text = main[1].strip()
+            if target_id is not None and text:
+                placeholder_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "Message hided."
+                not_for_you_text = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "This message is not for you."
 
-    target_id = await resolve_target(main[0], context)
-    if target_id is None: return
+                key = uuid.uuid4().hex[:16]
+                if exc_mode:
+                    secret_messages[key] = {
+                        "sender_id": user_id,
+                        "target_id": target_id,
+                        "text": not_for_you_text,
+                        "not_for_you_text": text
+                    }
+                else:
+                    secret_messages[key] = {
+                        "sender_id": user_id,
+                        "target_id": target_id,
+                        "text": text,
+                        "not_for_you_text": not_for_you_text
+                    }
+                keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
 
-    text = main[1].strip()
-    if not text: return
-
-    placeholder_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "Message hided."
-    not_for_you_text = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "This message is not for you."
-
-    key = uuid.uuid4().hex[:16]
-    secret_messages[key] = { "sender_id": user_id, "target_id": target_id, "text": text, "not_for_you_text": not_for_you_text }
-
-    keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
-    results = [
-        InlineQueryResultArticle(
-            id = key,
-            title = "Send message",
-            description = f"To *{target_id}*: {text}\nplaceholder_text: {placeholder_text}\nnot_for_you_text: {not_for_you_text}",
-            input_message_content = InputTextMessageContent(message_text = placeholder_text),
-            reply_markup = keyboard
-        )
-    ]
-
-    await update.inline_query.answer(results, cache_time=40)
+                results.append(
+                    InlineQueryResultArticle(
+                        id = key,
+                        title = "Send message",
+                        description = f"To {f'anyone but {user_id}' if exc_mode else user_id}: {text}\nText in message: {placeholder_text}\nTo {user_id if exc_mode else 'anyone'}: {not_for_you_text}",
+                        input_message_content = InputTextMessageContent(message_text = placeholder_text),
+                        reply_markup = keyboard
+                    )
+                )
+    await update.inline_query.answer(results, cache_time=30, is_personal=True)
 
 async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = update.chosen_inline_result
