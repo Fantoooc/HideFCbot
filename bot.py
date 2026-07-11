@@ -217,7 +217,7 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if target in BLACK_LIST:
         BLACK_LIST.discard(target)
-        save_blacklist()
+        save()
         await update.message.reply_text(f"User {target} unblocked.")
     else:
         await update.message.reply_text(f"User {target} is not in the blacklist.")
