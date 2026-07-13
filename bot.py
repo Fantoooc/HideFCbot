@@ -7,13 +7,15 @@ from telegram.ext import Application, CallbackQueryHandler, ContextTypes, Inline
 from telegram.error import BadRequest
 
 API_TOKEN = ""
+ADMINS_IDS: list[int] = list()
 
-ADMINS_IDS = [ ]
-BLACK_LIST = set()
-NOTIFICATIONS_LIST = set()
+BLACK_LIST: set[int] = set()
+NOTIFICATIONS_LIST: set[int] = set()
+
+CONFIG_LIST = "config.jsonl"
 LIST = "list.jsonl"
 
-secret_messages: dict[str, dict] = {}
+secret_messages: dict[str, tuple] = {}
 
 SPECIAL_CHARS = set("!&")
 FLAG_MAP = {
@@ -21,68 +23,116 @@ FLAG_MAP = {
     '&': "vis_flag"
 }
 
-def save() -> None:
-    with open(LIST, 'w', encoding="utf-8") as f:
-            f.write(json.dumps(API_TOKEN) + '\n')
-            f.write(json.dumps(ADMINS_IDS) + '\n')
-            f.write(json.dumps(list(BLACK_LIST)) + '\n')
-            f.write(json.dumps(list(NOTIFICATIONS_LIST)))
+def save_config() -> None:
+    with open(CONFIG_LIST, 'w', encoding="utf-8") as f:
+        f.write(json.dumps(API_TOKEN) + '\n')
+        f.write(json.dumps(ADMINS_IDS))
 
-def load() -> None:
-    global API_TOKEN, ADMINS_IDS, BLACK_LIST, NOTIFICATIONS_LIST
+def load_config() -> None:
+    global API_TOKEN, ADMINS_IDS
     try:
-        with open(LIST, 'r', encoding="utf-8") as f:
+        with open(CONFIG_LIST, 'r', encoding="utf-8") as f:
             API_TOKEN = json.loads(f.readline().strip())
             ADMINS_IDS = json.loads(f.readline().strip())
+    except (FileNotFoundError, json.JSONDecodeError, IndexError):
+        save_config()
+
+def save() -> None:
+    with open(LIST, 'w', encoding="utf-8") as f:
+        f.write(json.dumps(list(BLACK_LIST)) + '\n')
+        f.write(json.dumps(list(NOTIFICATIONS_LIST)))
+
+def load() -> None:
+    global BLACK_LIST, NOTIFICATIONS_LIST
+    try:
+        with open(LIST, 'r', encoding="utf-8") as f:
             BLACK_LIST = set(json.loads(f.readline().strip()))
             NOTIFICATIONS_LIST = set(json.loads(f.readline().strip()))
     except (FileNotFoundError, json.JSONDecodeError, IndexError):
         save()
 
-def get_text(message_key: str, message_data: dict, role: str) -> str:
-    text = message_data["text"]
-    other = message_data["not_for_you_text"]
+def build_utumessage(user_id: int, query: str) -> InlineQueryResultArticle | None:
+    parts = [ part.strip() for part in query.split('|') ]
+    if not parts or not parts[0]: return None
 
-    if role == "sender": return f"Message for {message_data['target_id']}:\n{text}\n\nMessage for anyone:\n{other}\n\n\nMessage id is: {message_key}"
-    elif role == "target":
-        if message_data.get("vis_flag"): return f"Message for you:\n{text}\n\nMessage for anyone:\n{other}\n\n\nMessage id is: {message_key}"
-        return f"Message:\n{text}\n\n\nMessage id is: {message_key}"
-    if message_data.get("vis_flag"): return f"Message for anyone:\n{text}\n\nMessage for {message_data['target_id']}:\n{other}\n\n\nMessage id is: {message_key}"
-    return other
+    main = parts[0].split(maxsplit=1)
+    if len(main) < 2: return None
 
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.inline_query.from_user.id
-    if user_id in BLACK_LIST: return
+    raw = main[0]
+    raw_len = len(raw)
+    i = 0
+    while i < raw_len and raw[i] in SPECIAL_CHARS:
+        i += 1
+    prefix_chars = set(raw[:i])
+    flags = { name: (char in prefix_chars) for char, name in FLAG_MAP.items() }
 
-    results = []
+    target_id = raw[i:]
+    message = main[1].strip()
 
-    user = update.inline_query.from_user
+    if not (target_id and (target_id[0] == '@' or target_id.isdigit()) and message): return None
+    placeholder_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "Message hided."
+    not_for_you_text = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "This message is not for you."
+
+    key = uuid.uuid4().hex[:16]
+    exc_flag, vis_flag = flags["exc_flag"], flags["vis_flag"]
+
+    if exc_flag:
+        secret_messages[key] = (user_id, target_id, not_for_you_text, message, exc_flag, vis_flag)
+        to_target_desc = f"To anyone but {target_id}: {message}"
+        to_others_desc = f"To {target_id}: {not_for_you_text}"
+    else:
+        secret_messages[key] = (user_id, target_id, message, not_for_you_text, exc_flag, vis_flag)
+        to_target_desc = f"To {target_id}: {message}"
+        to_others_desc = f"To anyone: {not_for_you_text}"
+
+    keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
+    return InlineQueryResultArticle(
+        id = key,
+        title = "Send message",
+        description = f"{to_target_desc}\nText in message: {placeholder_text}\n{to_others_desc}",
+        input_message_content = InputTextMessageContent(message_text = placeholder_text),
+        reply_markup = keyboard
+    )
+
+def build_info(user: User, user_id: int) -> InlineQueryResultArticle:
     info_text = (
         f"Your first name: {user.first_name or '-'}\n"
         f"Your last name: {user.last_name or '-'}\n"
         f"Your username: @{user.username or '-'}\n"
         f"Your telegram ID: {user_id}"
     )
-    if user_id in ADMINS_IDS: info_text += "\nYou are an admin"
+    if user_id in ADMINS_IDS: info_text += "\nYou are a bot admin"
 
-    results.append(
-        InlineQueryResultArticle(
-            id = "info",
-            title = "Send my info",
-            description = info_text.replace("\n", " | "),
-            input_message_content = InputTextMessageContent(message_text = info_text)
-        )
+    return InlineQueryResultArticle(
+        id="info",
+        title="Send my info",
+        description=info_text.replace("\n", " | "),
+        input_message_content=InputTextMessageContent(message_text=info_text),
     )
 
-    raw = update.inline_query.query
-    parts = [ part.strip() for part in raw.split('|') ]
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.inline_query.from_user.id
+    if user_id in BLACK_LIST: return
 
-    if len(parts) >= 1 and parts[0]:
+    query = update.inline_query.query
+    results = [ ]
+
+    if query.strip().lower() == "info":
+        results.append(build_info(update.inline_query.from_user, user_id))
+    else:
+        message_result = build_utumessage(user_id, query)
+        if message_result: results.append(message_result)
+
+    """
+    parts = [ part.strip() for part in update.inline_query.query.split('|') ]
+
+    if parts and parts[0]:
         main = parts[0].split(maxsplit = 1)
         if len(main) >= 2:
-            i = 0
             raw = main[0]
             raw_len = len(raw)
+
+            i = 0
             while i < raw_len and raw[i] in SPECIAL_CHARS:
                 i += 1
 
@@ -90,41 +140,35 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             flags = { name: (char in prefx_chars) for char, name in FLAG_MAP.items() }
 
             target_id = raw[i:]
+            message = main[1].strip()
 
-            if target_id and (target_id[0] == '@' or target_id.isdigit()):
-                message = main[1].strip()
-                if message:
-                    placeholder_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "Message hided."
-                    not_for_you_text = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "This message is not for you."
+            if target_id and (target_id[0] == '@' or target_id.isdigit()) and message:
+                placeholder_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else "Message hided."
+                not_for_you_text = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "This message is not for you."
 
-                    key = uuid.uuid4().hex[:16]
-                    if flags["exc_flag"]:
-                        secret_messages[key] = {
-                            "sender_id": user_id,
-                            "target_id": target_id,
-                            "text": not_for_you_text,
-                            "not_for_you_text": message,
-                            "vis_flag": flags["vis_flag"]
-                        }
-                    else:
-                        secret_messages[key] = {
-                            "sender_id": user_id,
-                            "target_id": target_id,
-                            "text": message,
-                            "not_for_you_text": not_for_you_text,
-                            "vis_flag": flags["vis_flag"]
-                        }
-                    keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
+                key = uuid.uuid4().hex[:16]
+                exc_flag, vis_flag = flags["exc_flag"], flags["vis_flag"]
 
-                    results.append(
-                        InlineQueryResultArticle(
-                            id = key,
-                            title = "Send message",
-                            description = f"To {f'anyone but {target_id}' if flags["exc_flag"] else target_id}: {message}\nText in message: {placeholder_text}\nTo {target_id if flags["exc_flag"] else 'anyone'}: {not_for_you_text}",
-                            input_message_content = InputTextMessageContent(message_text = placeholder_text),
-                            reply_markup = keyboard
-                        )
+                if exc_flag:
+                    secret_messages[key] = (user_id, target_id, not_for_you_text, message, exc_flag, vis_flag)
+                    to_target_desc = f"To anyone but {target_id}: {message}"
+                    to_others_desc = f"To {target_id}: {not_for_you_text}"
+                else:
+                    secret_messages[key] = (user_id, target_id, message, not_for_you_text, exc_flag, vis_flag)
+                    to_target_desc = f"To {target_id}: {message}"
+                    to_others_desc = f"To anyone: {not_for_you_text}"
+
+                keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
+                results.append(
+                    InlineQueryResultArticle(
+                        id = key,
+                        title = "Send message",
+                        description = f"{to_target_desc}\nText in message: {placeholder_text}\n{to_others_desc}",
+                        input_message_content = InputTextMessageContent(message_text = placeholder_text),
+                        reply_markup = keyboard
                     )
+                )
+    """
     try: await update.inline_query.answer(results, cache_time=10, is_personal=True)
     except BadRequest: return
 
@@ -133,7 +177,7 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
     key = result.result_id
     message_data = secret_messages.get(key)
     if not message_data: return
-    await notify_admins(context, f"New message sent from: {message_data['sender_id']}")
+    await notify_admins(context, f"New message sent from: {message_data[0]}")
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -149,16 +193,27 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         except BadRequest: return
         return
 
-    target = message_data["target_id"]
+    text = ""
 
-    if clicker_id == message_data["sender_id"]:
-        role = "sender"
+    sender = message_data[0]
+    target = message_data[1]
+
+    target_text = message_data[2]
+    other_text = message_data[3]
+
+    exc_flag = message_data[4]
+
+    if clicker_id == sender:
+        text = f"Message for {target}:\n{target_text}\n\nMessage for anyone:\n{other_text}\n\n\nMessage id is: {message_key}"
     elif clicker_id == target or clicker_username == target[1:]:
-        role = "target"
+        if exc_flag: text = f"Message:\n{target_text}"
+        elif message_data[5]: text = f"Message for you:\n{target_text}\n\nMessage for anyone:\n{other_text}\n\n\nMessage id is: {message_key}"
+        else: text = f"Message:\n{target_text}\n\n\nMessage id is: {message_key}"
     else:
-        role = "other"
+        if exc_flag and message_data[5]: text = f"Message for anyone:\n{other_text}\n\nMessage for {target}:\n{target_text}"
+        else: text = f"Message:\n{other_text}"
 
-    await query.answer(text=get_text(message_key, message_data, role), show_alert=True)
+    await query.answer(text=text, show_alert=True)
     await notify_admins(context,f"User @{clicker_username} ({clicker_id}) clicked on {message_key}")
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,7 +313,6 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else: await update.message.reply_text(text)
 
 def main():
-    load()
     app = Application.builder().token(API_TOKEN).connect_timeout(100).read_timeout(100).build()
 
     app.add_handler(InlineQueryHandler(inline_query))
@@ -276,4 +330,6 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    load_config()
+    load()
     main()
