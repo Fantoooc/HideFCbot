@@ -3,9 +3,9 @@ import json
 import uuid
 from datetime import datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InlineQueryResultArticle, InputTextMessageContent
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, InlineQueryHandler, CommandHandler, ChosenInlineResultHandler
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 
 API_TOKEN = ""
 ADMINS_IDS: list[int] = list()
@@ -94,11 +94,11 @@ def build_utumessage(user_id: int, query: str) -> InlineQueryResultArticle | Non
         to_target_desc = f"To {target_id}: {message}"
         to_others_desc = f"To anyone: {not_for_you_text}"
 
-    keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=key)] ])
+    keyboard = InlineKeyboardMarkup([ [InlineKeyboardButton("Message", callback_data=f"utumessage:{key}")] ])
     return InlineQueryResultArticle(
         id = key,
         title = "Send message",
-        description = f"{to_target_desc}\nText in message: {placeholder_text}\n{to_others_desc}",
+        description = f"{to_target_desc[:40]}...\nText in message: {placeholder_text[:40]}...\n{to_others_desc[:40]}...",
         input_message_content = InputTextMessageContent(message_text = placeholder_text),
         reply_markup = keyboard
     )
@@ -242,12 +242,13 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     if clicker_id in BLACK_LIST: return
     clicker_username = query.from_user.username
 
-    message_key = query.data
+    message = query.data.split(':')
+    act = message[0]
+    message_key = message[1]
     message_data = secret_messages.get(message_key)
 
-    if message_key.startswith("del:"):
-        key = message_key[4:]
-        data = secret_messages.get(key)
+    if act == "del":
+        data = secret_messages.get(message_key)
         is_username_match = (
             data[1] and
             clicker_username and
@@ -261,33 +262,30 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("You can't delete this message.", show_alert=True, cache_time=3600)
             return
 
-        del secret_messages[key]
-        await query.edit_message_text(f"Message {key} burned 🔥.")
+        del secret_messages[message_key]
+        await query.edit_message_text(f"Message {message_key} burned 🔥.")
         await query.answer()
         return
 
     if clicker_id in ADMINS_IDS or clicker_id in VIPS_LIST:
-        if message_key.startswith("ev_add:"):
-            parts = message_key.split(':')
-            key = parts[1]
-            event = parts[2]
+        if act == "ev_add":
+            event = message[2]
             event_time = datetime.now().isoformat()
-            EVENTS_LIST[key] = (event, event_time)
+            EVENTS_LIST[message_key] = (event, event_time)
             save()
             await query.edit_message_text(f"Event *{event}* added and saved\nSaved date in iso format is: {event_time}")
             await query.answer()
             return
-        elif message_key.startswith("ev_remove:"):
-            parts = message_key.split(':')
-            key = parts[1]
-            event = parts[2]
-            del EVENTS_LIST[key]
+        elif act == "ev_remove":
+            event = message[2]
+            del EVENTS_LIST[message_key]
             save()
             await query.edit_message_text(f"Event *{event}* was removed")
             await query.answer()
             return
 
-    if not message_data:
+    sddm = act == "senddm"
+    if not message_data and not sddm:
         try: await query.answer(text="No message in temp data.", show_alert=True, cache_time=3600)
         except BadRequest: return
         return
@@ -318,8 +316,31 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         if exc_flag and message_data[5]: text = f"Message for anyone:\n{other_text}\n\nMessage for {target}:\n{target_text}"
         else: text = f"Message:\n{other_text}"
 
-    await query.answer(text=text, show_alert=True)
+    if act == "senddm":
+        if clicker_id != target and clicker_username != target[1:] and clicker_id != sender: return
+        try:
+            await context.bot.send_message(chat_id=clicker_id, text=text)
+            await query.answer()
+        except Forbidden:
+            await query.answer("Couldn't reach that user — they need to start a chat with the bot first.", show_alert=True)
+        return
+
+    if len(text) <= 200:
+        await query.answer(text=text, show_alert=True)
+    else:
+        if clicker_id != target and clicker_username != target[1:] and clicker_id != sender: return
+        await query.answer(text="Message is too long for a popup.\nTap the button below to send full text in bot chat.\nIf you don't have a chat with the bot you won't get the message.", show_alert=True)
+        keyboard = [
+            [InlineKeyboardButton("Message", callback_data=f"utumessage:{message_key}")],
+            [InlineKeyboardButton("Open full message in DM", callback_data=f"senddm:{message_key}:clicker_id")]
+        ]
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+            if "Message is not modified" not in str(e): raise
     await notify_admins(context,f"User @{clicker_username} ({clicker_id}) clicked on {message_key}")
+
+
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
